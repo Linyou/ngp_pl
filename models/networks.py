@@ -6,7 +6,14 @@ from einops import rearrange
 from .custom_functions import TruncExp
 import numpy as np
 
+
+from typing import Callable, Optional
 from .rendering import NEAR_DISTANCE
+from .custom_functions import VolumeRenderer
+from .taichi_modules import (
+    HashEncoder, DirEncoder, HashEmbedder, SHEncoder, 
+    VolumeRendererTaichi
+)
 
 
 class NGP(nn.Module):
@@ -33,12 +40,12 @@ class NGP(nn.Module):
         b = np.exp(np.log(2048*scale/N_min)/(L-1))
         print(f'GridEncoding: Nmin={N_min} b={b:.5f} F={F} T=2^{log2_T} L={L}')
 
-        self.xyz_encoder = \
-            tcnn.NetworkWithInputEncoding(
-                n_input_dims=3, n_output_dims=16,
+        self.hash_encoder = \
+            tcnn.Encoding(
+                n_input_dims=3,
                 encoding_config={
                     "otype": "Grid",
-	                "type": "Hash",
+                    "type": "Hash",
                     "n_levels": L,
                     "n_features_per_level": F,
                     "log2_hashmap_size": log2_T,
@@ -46,6 +53,12 @@ class NGP(nn.Module):
                     "per_level_scale": b,
                     "interpolation": "Linear"
                 },
+            )
+            
+
+        self.xyz_encoder = \
+            tcnn.Network(
+                n_input_dims=32, n_output_dims=16,
                 network_config={
                     "otype": "FullyFusedMLP",
                     "activation": "ReLU",
@@ -267,3 +280,154 @@ class NGP(nn.Module):
 
         vren.packbits(self.density_grid, min(mean_density, density_threshold),
                       self.density_bitfield)
+
+
+class MLP(nn.Module):
+    '''
+        A simple MLP with skip connections from:
+        https://github.com/KAIR-BAIR/nerfacc/blob/master/examples/radiance_fields/mlp.py
+    '''
+    def __init__(
+        self,
+        input_dim: int,  # The number of input tensor channels.
+        output_dim: int = None,  # The number of output tensor channels.
+        net_depth: int = 8,  # The depth of the MLP.
+        net_width: int = 256,  # The width of the MLP.
+        skip_layer: int = 4,  # The layer to add skip layers to.
+        hidden_init: Callable = nn.init.xavier_uniform_,
+        hidden_activation: Callable = nn.ReLU(),
+        output_enabled: bool = True,
+        output_init: Optional[Callable] = nn.init.xavier_uniform_,
+        output_activation: Optional[Callable] = nn.Identity(),
+        bias_enabled: bool = True,
+        bias_init: Callable = nn.init.zeros_,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.net_depth = net_depth
+        self.net_width = net_width
+        self.skip_layer = skip_layer
+        self.hidden_init = hidden_init
+        self.hidden_activation = hidden_activation
+        self.output_enabled = output_enabled
+        self.output_init = output_init
+        self.output_activation = output_activation
+        self.bias_enabled = bias_enabled
+        self.bias_init = bias_init
+
+        self.hidden_layers = nn.ModuleList()
+        in_features = self.input_dim
+        for i in range(self.net_depth):
+            self.hidden_layers.append(
+                nn.Linear(in_features, self.net_width, bias=bias_enabled)
+            )
+            if (
+                (self.skip_layer is not None)
+                and (i % self.skip_layer == 0)
+                and (i > 0)
+            ):
+                in_features = self.net_width + self.input_dim
+            else:
+                in_features = self.net_width
+        if self.output_enabled:
+            self.output_layer = nn.Linear(
+                in_features, self.output_dim, bias=bias_enabled
+            )
+        else:
+            self.output_dim = in_features
+
+        self.initialize()
+
+    def initialize(self):
+        def init_func_hidden(m):
+            if isinstance(m, nn.Linear):
+                if self.hidden_init is not None:
+                    self.hidden_init(m.weight)
+                if self.bias_enabled and self.bias_init is not None:
+                    self.bias_init(m.bias)
+
+        self.hidden_layers.apply(init_func_hidden)
+        if self.output_enabled:
+
+            def init_func_output(m):
+                if isinstance(m, nn.Linear):
+                    if self.output_init is not None:
+                        self.output_init(m.weight)
+                    if self.bias_enabled and self.bias_init is not None:
+                        self.bias_init(m.bias)
+
+            self.output_layer.apply(init_func_output)
+
+    # @torch.autocast(device_type="cuda", dtype=torch.float32)
+    def forward(self, x):
+        inputs = x
+        for i in range(self.net_depth):
+            x = self.hidden_layers[i](x)
+            x = self.hidden_activation(x)
+            if (
+                (self.skip_layer is not None)
+                and (i % self.skip_layer == 0)
+                and (i > 0)
+            ):
+                x = torch.cat([x, inputs], dim=-1)
+        if self.output_enabled:
+            x = self.output_layer(x)
+            x = self.output_activation(x)
+        return x
+
+class TaichiNGP(NGP):
+    def __init__(self, args, scale, rgb_act='Sigmoid'):
+        super().__init__(scale, rgb_act)
+
+        if args.hash_type == 'taichi':
+            self.hash_encoder = HashEncoder()
+        elif args.hash_type == 'torch':
+            self.hash_encoder = HashEmbedder()
+
+        if args.dir_type == 'taichi':
+            self.dir_encoder = DirEncoder()
+        elif args.dir_type == 'torch':
+            self.dir_encoder = SHEncoder()
+
+        if args.rendering_ad == 'cuda':
+            self.render_func = VolumeRenderer.apply
+        elif args.rendering_ad == 'taichi':
+            self.render_func = VolumeRendererTaichi()
+
+
+        self.xyz_encoder = \
+            MLP(
+                input_dim=32, 
+                output_dim=16,
+                net_depth=1, 
+                net_width=64,
+                bias_enabled=False,
+            )
+
+        self.rgb_net = \
+            MLP(
+                input_dim=32, 
+                output_dim=3,
+                net_depth=2, 
+                net_width=64,
+                bias_enabled=False,
+                output_activation=nn.Sigmoid()
+            )
+
+
+    def density(self, x, return_feat=False):
+        """
+        Inputs:
+            x: (N, 3) xyz in [-scale, scale]
+            return_feat: whether to return intermediate feature
+
+        Outputs:
+            sigmas: (N)
+        """
+        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min)
+        embedding = self.hash_encoder(x)
+        h = self.xyz_encoder(embedding)
+        sigmas = TruncExp.apply(h[:, 0])
+        if return_feat: return sigmas, h
+        return sigmas

@@ -37,7 +37,7 @@ __global__ void composite_train_fw_kernel(
         ws[s] = w;
         T *= 1.0f-a;
 
-        if (T <= T_threshold) break; // ray has enough opacity
+        // if (T <= T_threshold) break; // ray has enough opacity
         samples++;
     }
     total_samples[ray_idx] = samples;
@@ -144,7 +144,7 @@ __global__ void composite_train_bw_kernel(
             T*dL_dws[s]-(dL_dws_times_ws_sum-dL_dws_times_ws[s]) // gradient from ws
         );
 
-        if (T <= T_threshold) break; // ray has enough opacity
+        // if (T <= T_threshold) break; // ray has enough opacity
         samples++;
     }
 }

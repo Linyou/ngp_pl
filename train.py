@@ -2,11 +2,15 @@ import torch
 from torch import nn
 from opt import get_opts
 import os
+import time
 import glob
 import imageio
 import numpy as np
 import cv2
 from einops import rearrange
+
+import taichi as ti
+ti.init(arch=ti.cuda, device_memory_GB=6)
 
 # data
 from torch.utils.data import DataLoader
@@ -15,7 +19,7 @@ from datasets.ray_utils import axisangle_to_R, get_rays
 
 # models
 from kornia.utils.grid import create_meshgrid3d
-from models.networks import NGP
+from models.networks import NGP, TaichiNGP
 from models.rendering import render, MAX_SAMPLES
 
 # optimizer, losses
@@ -68,12 +72,15 @@ class NeRFSystem(LightningModule):
                 p.requires_grad = False
 
         rgb_act = 'None' if self.hparams.use_exposure else 'Sigmoid'
-        self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act)
+        # self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act)
+        self.model = TaichiNGP(self.hparams, scale=self.hparams.scale, rgb_act=rgb_act)
         G = self.model.grid_size
         self.model.register_buffer('density_grid',
             torch.zeros(self.model.cascades, G**3))
         self.model.register_buffer('grid_coords',
             create_meshgrid3d(G, G, G, False, dtype=torch.int32).reshape(-1, 3))
+
+        self.tic = 0.0
 
     def forward(self, batch, split):
         if split=='train':
@@ -155,6 +162,11 @@ class NeRFSystem(LightningModule):
         self.model.mark_invisible_cells(self.train_dataset.K.to(self.device),
                                         self.poses,
                                         self.train_dataset.img_wh)
+
+        self.tic = time.time()
+
+    def on_train_end(self):
+        self.elapsed_time = time.time() - self.tic
 
     def training_step(self, batch, batch_nb, *args):
         if self.global_step%self.update_interval == 0:
@@ -274,6 +286,7 @@ if __name__ == '__main__':
                       precision=16)
 
     trainer.fit(system, ckpt_path=hparams.ckpt_path)
+    print(f"total training time: {system.elapsed_time:.2f}")
 
     if not hparams.val_only: # save slimmed ckpt for the last epoch
         ckpt_ = \

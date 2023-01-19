@@ -67,4 +67,14 @@ def get_opts():
     parser.add_argument('--weight_path', type=str, default=None,
                         help='pretrained checkpoint to load (excluding optimizers, etc)')
 
+    # ad
+    parser.add_argument('--hash_type', type=str, default='cuda',
+                        choices=['cuda', 'taichi', 'torch'])
+
+    parser.add_argument('--dir_type', type=str, default='cuda',
+                        choices=['cuda', 'taichi', 'torch'])
+
+    parser.add_argument('--rendering_ad', type=str, default='cuda',
+                        choices=['cuda', 'taichi', ])
+
     return parser.parse_args()
