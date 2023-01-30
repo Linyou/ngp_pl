@@ -77,6 +77,7 @@ class ColmapDataset(BaseDataset):
 
         self.rays = []
         if split == 'test_traj': # use precomputed test poses
+            self.poses = np.array([x for i, x in enumerate(self.poses) if i%8==0])
             self.poses = create_spheric_poses(1.2, self.poses[:, 1, 3].mean())
             self.poses = torch.FloatTensor(self.poses)
             return

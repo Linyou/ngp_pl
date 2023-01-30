@@ -5,6 +5,7 @@ from .utils import (
     torch2ti_grad, ti2torch_grad, ti2torch, torch2ti,
     data_type, torch_type
 )
+import os
 
 
 @ti.kernel
@@ -81,11 +82,12 @@ def composite_train_fw(
         # while samples<N_samples:
         for sample_ in range(N_samples):
             # T_ = T[ray_idx, samples]
-                s = start_idx + sample_
+            s = start_idx + sample_
+            T_ = T[s]
+            if T_>T_threshold:
                 # s = start_idx + sample_
                 a = 1.0 - ti.exp(-sigmas[s]*deltas[s])
-                w = a*T[s]
-
+                w = a*T_
                 rgb[ray_idx, 0] += w*rgbs[s, 0]
                 rgb[ray_idx, 1] += w*rgbs[s, 1]
                 rgb[ray_idx, 2] += w*rgbs[s, 2]
@@ -93,12 +95,14 @@ def composite_train_fw(
                 opacity[ray_idx] += w
                 ws[s] = w
                 # T_ *= (1.0-a)
-                T[s+1] = T[s] * (1.0-a)
-                # if T[ray_idx, samples+1]>=T_threshold:
+                T[s+1] = T_ * (1.0-a)
+                # if T[s+1]>=T_threshold:
                 # samples += 1
-                # total_samples[ray_idx] += 1
+                total_samples[ray_idx] += 1
+            else:
+                T[s+1] = 0.0
 
-        total_samples[ray_idx] = N_samples
+        # total_samples[ray_idx] = N_samples
             
 
 @ti.kernel
@@ -219,6 +223,7 @@ class VolumeRenderer(torch.nn.Module):
                 return sigma_grad, rgb_grad, None, None, None, None
 
         self._module_function = _module_function
+        self.save = False
 
     def zero_grad(self):
 
@@ -235,5 +240,13 @@ class VolumeRenderer(torch.nn.Module):
         # self.ws_fields.grad.fill(0.)
 
     def forward(self, sigmas, rgbs, deltas, ts, rays_a, T_threshold):
+        if self.save ==True:
+            os.makedirs('./test_data', exist_ok=True)
+            torch.save(sigmas, './test_data/sigmas.t')
+            torch.save(rgbs, './test_data/rgbs.t')
+            torch.save(deltas, './test_data/deltas.t')
+            torch.save(ts, './test_data/ts.t')
+            torch.save(rays_a, './test_data/rays_a.t')
+            self.save = False
         return self._module_function.apply(sigmas, rgbs, deltas, ts, rays_a, T_threshold)
 

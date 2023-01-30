@@ -15,6 +15,12 @@ from .taichi_modules import (
     VolumeRendererTaichi
 )
 
+class VolumeRendererCuda(nn.Module):
+    def __init__(self,):
+        super().__init__()
+
+    def forward(self, sigmas, rgbs, deltas, ts, rays_a, T_threshold):
+        return VolumeRenderer.apply(sigmas, rgbs, deltas, ts, rays_a, T_threshold)
 
 class NGP(nn.Module):
     def __init__(self, scale, rgb_act='Sigmoid'):
@@ -55,7 +61,6 @@ class NGP(nn.Module):
                 },
             )
             
-
         self.xyz_encoder = \
             tcnn.Network(
                 n_input_dims=32, n_output_dims=16,
@@ -380,20 +385,22 @@ class TaichiNGP(NGP):
     def __init__(self, args, scale, rgb_act='Sigmoid'):
         super().__init__(scale, rgb_act)
 
+        self.b = self.hash_encoder.native_tcnn_module.hyperparams()['per_level_scale']
+
         if args.hash_type == 'taichi':
-            self.hash_encoder = HashEncoder()
+            self.hash_encoder = HashEncoder(self.hash_encoder.params, self.b, args.batch_size)
         elif args.hash_type == 'torch':
-            self.hash_encoder = HashEmbedder()
+            self.hash_encoder = HashEmbedder(b=self.b)
 
         if args.dir_type == 'taichi':
-            self.dir_encoder = DirEncoder()
+            self.dir_encoder = DirEncoder(args.batch_size)
         elif args.dir_type == 'torch':
             self.dir_encoder = SHEncoder()
 
         if args.rendering_ad == 'cuda':
-            self.render_func = VolumeRenderer.apply
+            self.render_func = VolumeRendererCuda()
         elif args.rendering_ad == 'taichi':
-            self.render_func = VolumeRendererTaichi()
+            self.render_func = VolumeRendererTaichi(args.batch_size)
 
 
         self.xyz_encoder = \

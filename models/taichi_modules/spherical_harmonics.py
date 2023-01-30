@@ -1,11 +1,15 @@
 import taichi as ti
+import os
 import torch
 from taichi.math import vec3
 from torch.cuda.amp import custom_fwd, custom_bwd
 from .utils import (
     torch2ti_grad, ti2torch_grad, ti2torch, torch2ti,
-    data_type, torch_type
+    # data_type, torch_type
 )
+
+data_type = ti.f16
+torch_type = torch.float16
 
 @ti.kernel
 def dir_encoder(
@@ -13,7 +17,6 @@ def dir_encoder(
     embedding: ti.template(), 
     B: ti.i32
 ):
-
     # spherical_harmonics
     ti.loop_config(block_dim=256)
     for i in ti.ndrange(B):
@@ -85,16 +88,10 @@ class DirEncoder(torch.nn.Module):
             @staticmethod
             @custom_bwd
             def backward(ctx, doutput):
-                if doutput is None:
-                    print("all None")
-                    return None
-
-                if not doutput.is_cuda:
-                    print("TAICHI WARNING: doutput must be a CUDA tensor, but isn't. This indicates suboptimal performance.")
-                    doutput = doutput.cuda()
 
                 input_size = ctx.input_size
                 grad = torch.zeros(*input_size, device=doutput.device, dtype=torch_type)
+                # doutput *= 128
 
                 # zero out the gradient
                 self.input_fields.grad.fill(0)
@@ -111,7 +108,12 @@ class DirEncoder(torch.nn.Module):
                 return grad
 
         self._module_function = _module_function
+        self.save = False
 
 
-    def forward(self, positions):
-        return self._module_function.apply(positions)
+    def forward(self, dir):
+        if self.save ==True:
+            os.makedirs('./test_data', exist_ok=True)
+            torch.save(dir, './test_data/dir.t')
+            self.save = False
+        return self._module_function.apply(dir)

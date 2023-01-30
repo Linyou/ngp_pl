@@ -1,3 +1,4 @@
+import os
 import torch 
 import numpy as np
 import taichi as ti
@@ -60,7 +61,9 @@ def grid_pos2hash_index(indicator, pos_grid_local, resolution, map_size):
 
     return hash_result % map_size
 
-per_level_scale = 1.3195079565048218
+# per_level_scale = 0.
+ivec8 = ti.types.vector(8, dtype=ti.i32)
+fvec8 = ti.types.vector(8, dtype=ti.f16)
 @ti.kernel
 def hash_encode_kernel(
                 xyzs: ti.template(),
@@ -70,6 +73,7 @@ def hash_encode_kernel(
 hash_map_sizes_field: ti.template(),
              offsets: ti.template(),
                    B: ti.i32,
+     per_level_scale: ti.f32
     ):
 
     # get hash table embedding
@@ -94,6 +98,8 @@ hash_map_sizes_field: ti.template(),
 
         local_feature_0 = 0.0
         local_feature_1 = 0.0
+        # init_0 = 0.0
+        # init_1 = 0.0
         # init_w = 1.0
         # local_feature_0 = ti.f16(init_0)
         # local_feature_1 = ti.f16(init_1)
@@ -101,31 +107,40 @@ hash_map_sizes_field: ti.template(),
         for idx in ti.static(range(8)):
             # idx_uint = ti.cast(idx, ti.uint32)
             w = 1.
+            # w = ti.f16(init_w)
             pos_grid_local = uvec3(0)
 
             for d in ti.static(range(3)):
                 if (idx & (1 << d)) == 0:
                     pos_grid_local[d] = pos_grid_uint[d]
+                    # w *= ti.f16(1 - pos[d])
                     w *= 1 - pos[d]
                 else:
                     pos_grid_local[d] = pos_grid_uint[d] + 1
+                    # w *= ti.f16(pos[d])
                     w *= pos[d]
 
             index = grid_pos2hash_index(indicator, pos_grid_local, resolution, map_size)
             index_table = offset+index*2
             index_table_int = ti.cast(index_table, ti.int32)
+            # local_feature_0 += w * ti.f16(table[index_table_int])
+            # local_feature_1 += w * ti.f16(table[index_table_int+1])
             local_feature_0 += w * table[index_table_int]
             local_feature_1 += w * table[index_table_int+1]
 
+        # xyzs_embedding[i, level*2] = data_type(local_feature_0)
+        # xyzs_embedding[i, level*2+1] = data_type(local_feature_1)
         xyzs_embedding[i, level*2] = local_feature_0
         xyzs_embedding[i, level*2+1] = local_feature_1
 
-
 class HashEncoder(torch.nn.Module):
-    def __init__(self, batch_size=8192):
+    def __init__(self, tcnn_params, b=1.3195079565048218, batch_size=8192):
         super(HashEncoder, self).__init__()
 
+        self.per_level_scale = b
+
         # per_level_scale = 1.3195079565048218
+        print("per_level_scale: ", b)
         self.offsets = ti.field(ti.i32, shape=(16,))
         self.hash_map_sizes_field = ti.field(ti.uint32, shape=(16,))
         self.hash_map_indicator = ti.field(ti.i32, shape=(16,))
@@ -134,7 +149,7 @@ class HashEncoder(torch.nn.Module):
         offset_ = 0
         hash_map_sizes = []
         for i in range(16):
-            resolution = int(np.ceil(base_res * np.exp(i*np.log(per_level_scale)) - 1.0)) + 1
+            resolution = int(np.ceil(base_res * np.exp(i*np.log(self.per_level_scale)) - 1.0)) + 1
             params_in_level = resolution ** 3
             params_in_level = int(resolution ** 3) if params_in_level % 8 == 0 else int((params_in_level + 8 - 1) / 8) * 8
             params_in_level = min(max_params, params_in_level)
@@ -146,14 +161,13 @@ class HashEncoder(torch.nn.Module):
         size = np.uint32(np.array(hash_map_sizes))
         self.hash_map_sizes_field.from_numpy(size) 
 
-
         self.total_hash_size = offset_*2
 
         self.hash_table = torch.nn.Parameter(
             torch.zeros(self.total_hash_size, dtype=torch_type), requires_grad=True
         )
-        random_initialize(self.hash_table)
-        # ti_copy_array(self.hash_table, self.tcnn_hash.params.to(torch.float32))
+        # random_initialize(self.hash_table)
+        ti_copy_array(self.hash_table, tcnn_params.to(torch.float32))
 
         self.parameter_fields = ti.field(data_type, shape=(self.total_hash_size,), needs_grad=True)
         self.input_fields = ti.field(dtype=data_type, shape=(batch_size*1024, 3), needs_grad=True)
@@ -179,6 +193,7 @@ class HashEncoder(torch.nn.Module):
                     self.hash_map_sizes_field,
                     self.offsets,
                     input_pos.shape[0],
+                    self.per_level_scale,
                 )
                 ti2torch(self.output_fields, output_embedding)
                 # ti.sync()
@@ -192,7 +207,7 @@ class HashEncoder(torch.nn.Module):
                 grad = torch.zeros(self.total_hash_size, dtype=torch_type, device=doutput.device)
                 self.zero_grad()
                 # ti.sync()
-                # doutput_scale = doutput
+                # doutput *= 128
                 # print("doutput max", doutput_scale.mean())
                 torch2ti_grad(self.output_fields, doutput.contiguous())
                 hash_encode_kernel.grad(
@@ -203,12 +218,14 @@ class HashEncoder(torch.nn.Module):
                     self.hash_map_sizes_field,
                     self.offsets,
                     doutput.shape[0],
+                    self.per_level_scale,
                 )
                 ti2torch_grad(self.parameter_fields, grad)
                 # ti.sync()
                 return None, grad
 
         self._module_function = _module_function
+        self.save = False
 
     def zero_grad(self):
         self.parameter_fields.grad.fill(0.)
@@ -216,4 +233,8 @@ class HashEncoder(torch.nn.Module):
         # self.output_fields.grad.fill(0.)
 
     def forward(self, positions):
+        if self.save ==True:
+            os.makedirs('./test_data', exist_ok=True)
+            torch.save(positions, './test_data/positions.t')
+            self.save = False
         return self._module_function.apply(positions, self.hash_table)

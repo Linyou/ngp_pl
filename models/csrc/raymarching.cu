@@ -1,4 +1,6 @@
 #include "helper_math.h"
+#include <thrust/reduce.h>
+#include <thrust/execution_policy.h>
 #include "utils.h"
 
 #define SQRT3 1.73205080757f
