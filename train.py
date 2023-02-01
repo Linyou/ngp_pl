@@ -29,7 +29,7 @@ from models.networks import NGP, TaichiNGP
 from models.rendering import render, MAX_SAMPLES
 
 # optimizer, losses
-from apex.optimizers import FusedAdam
+# from apex.optimizers import FusedAdam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from losses import NeRFLoss
 
@@ -161,10 +161,10 @@ class NeRFSystem(LightningModule):
             if n not in ['dR', 'dT']: net_params += [p]
 
         opts = []
-        self.net_opt = FusedAdam(net_params, self.hparams.lr, eps=1e-15)
+        self.net_opt = torch.optim.Adam(net_params, self.hparams.lr, eps=1e-15)
         opts += [self.net_opt]
         if self.hparams.optimize_ext:
-            opts += [FusedAdam([self.dR, self.dT], 1e-6)] # learning rate is hard-coded
+            opts += [torch.optim.Adam([self.dR, self.dT], 1e-6)] # learning rate is hard-coded
         net_sch = CosineAnnealingLR(self.net_opt,
                                     self.hparams.num_epochs,
                                     self.hparams.lr/30)

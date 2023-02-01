@@ -1,14 +1,18 @@
+import os
 import torch
-from .custom_functions import \
-    RayAABBIntersector, RayMarcher, VolumeRenderer
+if os.environ['NGP_BACKEND'] == 'taichi':
+    from .taichi_modules import RayAABBIntersector, RayMarcher
+    from .taichi_modules import raymarching_test
+    from .taichi_modules import composite_test as composite_test_fw
+else:
+    from vren import raymarching_test, composite_test_fw
+    from .custom_functions import \
+        RayAABBIntersector, RayMarcher
 from einops import rearrange
-import vren
 
 MAX_SAMPLES = 1024
 NEAR_DISTANCE = 0.01
 
-
-@torch.cuda.amp.autocast()
 def render(model, rays_o, rays_d, **kwargs):
     """
     Render rays by
@@ -24,9 +28,13 @@ def render(model, rays_o, rays_d, **kwargs):
         result: dictionary containing final rgb and depth
     """
     rays_o = rays_o.contiguous(); rays_d = rays_d.contiguous()
-    _, hits_t, _ = \
-        RayAABBIntersector.apply(rays_o, rays_d, model.center, model.half_size, 1)
-    hits_t[(hits_t[:, 0, 0]>=0)&(hits_t[:, 0, 0]<NEAR_DISTANCE), 0, 0] = NEAR_DISTANCE
+
+    _, hits_t, _ = RayAABBIntersector.apply(rays_o, rays_d, model.center, model.half_size, 1)
+    if os.environ['NGP_BACKEND'] != 'taichi':
+        hits_t[(hits_t[:, 0, 0]>=0)&(hits_t[:, 0, 0]<NEAR_DISTANCE), 0, 0] = NEAR_DISTANCE
+    # _, hits_t, _ = \
+    #     RayAABBIntersector.apply(rays_o, rays_d, model.center, model.half_size, 1)
+    # hits_t[(hits_t[:, 0, 0]>=0)&(hits_t[:, 0, 0]<NEAR_DISTANCE), 0, 0] = NEAR_DISTANCE
 
     if kwargs.get('test_time', False):
         render_func = __render_rays_test
@@ -81,7 +89,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
         samples += N_samples
 
         xyzs, dirs, deltas, ts, N_eff_samples = \
-            vren.raymarching_test(rays_o, rays_d, hits_t[:, 0], alive_indices,
+            raymarching_test(rays_o, rays_d, hits_t[:, 0], alive_indices,
                                   model.density_bitfield, model.cascades,
                                   model.scale, exp_step_factor,
                                   model.grid_size, MAX_SAMPLES, N_samples)
@@ -98,7 +106,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
         sigmas = rearrange(sigmas, '(n1 n2) -> n1 n2', n2=N_samples)
         rgbs = rearrange(rgbs, '(n1 n2) c -> n1 n2 c', n2=N_samples)
 
-        vren.composite_test_fw(
+        composite_test_fw(
             sigmas, rgbs, deltas, ts,
             hits_t[:, 0], alive_indices, kwargs.get('T_threshold', 1e-4),
             N_eff_samples, opacity, depth, rgb)

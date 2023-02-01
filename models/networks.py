@@ -1,19 +1,38 @@
 import torch
 from torch import nn
 import tinycudann as tcnn
-import vren
 from einops import rearrange
-from .custom_functions import TruncExp
+# from .custom_functions import TruncExp
 import numpy as np
+from torch.cuda.amp import custom_fwd, custom_bwd
 
-
+import os
 from typing import Callable, Optional
 from .rendering import NEAR_DISTANCE
-from .custom_functions import VolumeRenderer
+if os.environ['NGP_BACKEND'] == 'taichi':
+    from .taichi_modules import VolumeRenderer
+    from .taichi_modules import morton3D, morton3D_invert, packbits
+else:
+    from .custom_functions import VolumeRenderer
+    from vren import morton3D, morton3D_invert, packbits
+
 from .taichi_modules import (
     HashEncoder, DirEncoder, HashEmbedder, SHEncoder, 
     VolumeRendererTaichi
 )
+
+class TruncExp(torch.autograd.Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return torch.exp(x)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, dL_dout):
+        x = ctx.saved_tensors[0]
+        return dL_dout * torch.exp(x.clamp(-15, 15))
 
 class VolumeRendererCuda(nn.Module):
     def __init__(self,):
@@ -179,7 +198,7 @@ class NGP(nn.Module):
             cells: list (of length self.cascades) of indices and coords
                    selected at each cascade
         """
-        indices = vren.morton3D(self.grid_coords).long()
+        indices = morton3D(self.grid_coords).long()
         cells = [(indices, self.grid_coords)] * self.cascades
 
         return cells
@@ -199,14 +218,14 @@ class NGP(nn.Module):
             # uniform cells
             coords1 = torch.randint(self.grid_size, (M, 3), dtype=torch.int32,
                                     device=self.density_grid.device)
-            indices1 = vren.morton3D(coords1).long()
+            indices1 = morton3D(coords1).long()
             # occupied cells
             indices2 = torch.nonzero(self.density_grid[c]>density_threshold)[:, 0]
             if len(indices2)>0:
                 rand_idx = torch.randint(len(indices2), (M,),
                                          device=self.density_grid.device)
                 indices2 = indices2[rand_idx]
-            coords2 = vren.morton3D_invert(indices2.int())
+            coords2 = morton3D_invert(indices2.int())
             # concatenate
             cells += [(torch.cat([indices1, indices2]), torch.cat([coords1, coords2]))]
 
@@ -283,7 +302,7 @@ class NGP(nn.Module):
 
         mean_density = self.density_grid[self.density_grid>0].mean().item()
 
-        vren.packbits(self.density_grid, min(mean_density, density_threshold),
+        packbits(self.density_grid.reshape(-1).contiguous(), min(mean_density, density_threshold),
                       self.density_bitfield)
 
 
