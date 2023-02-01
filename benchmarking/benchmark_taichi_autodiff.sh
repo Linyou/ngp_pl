@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export ROOT_DIR=/home/loyot/workspace/code/ngp_pl_gui/Synthetic_NeRF
+export ROOT_DIR=./Synthetic_NeRF
 
 # python train.py \
 #     --root_dir $ROOT_DIR/Chair \
