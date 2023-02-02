@@ -14,7 +14,9 @@ SQRT3 = 1.7320508075688772
 SQRT3_MAX_SAMPLES = SQRT3/1024
 SQRT3_2 = 1.7320508075688772*2
 
-
+@ti.func
+def scalbn(x, exponent):
+    return x * ti.math.pow(2, exponent)
 
 @ti.func
 def calc_dt(t, exp_step_factor, grid_size, scale):
@@ -34,14 +36,36 @@ def frexp(x, base):
     return exponent
 
 @ti.func
+def frexp_bit(x):
+    exponent = 0.0
+    if x != 0.0:
+        bits = ti.bit_cast(x, ti.u32)
+        exponent = ti.i32(bits >> 23 & 0xff) - 0x7f
+    return exponent
+
+# float frexp(float x, int* exp) {
+#     if (x == 0.0f) {
+#         *exp = 0;
+#         return 0.0f;
+#     }
+
+#     std::uint32_t bits = *reinterpret_cast<std::uint32_t*>(&x);
+#     int e = (int)(bits >> 23 & 0xff) - 0x7f;
+#     *exp = e;
+#     bits &= 0x7fffff;
+#     bits |= 0x3f800000;
+#     return *reinterpret_cast<float*>(&bits) * (x < 0 ? -1.0f : 1.0f);
+# }
+
+@ti.func
 def mip_from_pos(xyz, cascades):
     mx = ti.abs(xyz).max()
-    exponent = frexp(mx, 0.5)
+    exponent = frexp_bit(mx)
     return ti.min(exponent, cascades-1)
 
 @ti.func
 def mip_from_dt(dt, grid_size, cascades):
-    exponent = frexp(dt*grid_size, 1.0/grid_size)
+    exponent = frexp_bit(dt*grid_size)
     return ti.min(exponent, cascades-1)
 
 @ti.func

@@ -2,7 +2,7 @@ import taichi as ti
 import torch
 from taichi.math import vec3, uvec3
 from torch.cuda.amp import custom_fwd, custom_bwd
-from .utils import calc_dt, mip_from_pos, mip_from_dt, __morton3D, __morton3D_invert
+from .utils import calc_dt, mip_from_pos, mip_from_dt, __morton3D, __morton3D_invert, scalbn
 
 
 @ti.kernel
@@ -43,10 +43,11 @@ def raymarching_train(
         while (0<=t) & (t<t2) & (N_samples<max_samples):
             xyz = ray_o + t*ray_d
             dt = calc_dt(t, exp_step_factor, grid_size, scale)
-            # mip = ti.max(mip_from_pos(xyz, cascades),
-            #              mip_from_dt(dt, grid_size, cascades))
+            mip = ti.max(mip_from_pos(xyz, cascades),
+                         mip_from_dt(dt, grid_size, cascades))
 
-            mip_bound = 0.5
+            # mip_bound = 0.5
+            mip_bound = ti.min(scalbn(1., mip-1), scale)
             mip_bound_inv = 1/mip_bound
 
             nxyz = ti.math.clamp(0.5*(xyz*mip_bound_inv+1)*grid_size, 0.0, grid_size-1.0)
